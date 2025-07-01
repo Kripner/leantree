@@ -1,0 +1,3 @@
+[submodule "lean-repl"]
+	path = lean-repl
+	url = https://github.com/Kripner/lean-repl.git
