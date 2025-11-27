@@ -5,7 +5,7 @@
 Clone the repository including submodules:
 
 ```bash
-git clone --recurse-submodules https://github.com/LeanTreeAnonymized/LeanTree.git
+git clone --recurse-submodules https://github.com/Kripner/leantree.git
 ```
 
 Ensure [Lean 4.19](https://docs.lean-lang.org/lean4/doc/setup.html) is installed via elan.
