@@ -53,6 +53,8 @@ class LeanProcessPool:
         total_memory = psutil.virtual_memory().total
         self.memory_threshold_per_process = int(total_memory * (self.max_memory_utilization / 100) / self.max_processes)
 
+        self._was_shutdown = False
+
     async def _create_process_async(self) -> LeanProcess:
         """Create a new LeanProcess instance."""
         process = LeanProcess(
@@ -147,24 +149,30 @@ class LeanProcessPool:
             process: The LeanProcess instance to return
         """
 
-        try:
-            memory_usage = process.virtual_memory_usage()
-            if self.memory_threshold_per_process and memory_usage > self.memory_threshold_per_process:
-                self.logger.debug(
-                    f"Process memory usage ({memory_usage / (1024 * 1024):.2f} MB) exceeds threshold "
-                    f"({self.memory_threshold_per_process / (1024 * 1024):.2f} MB). Terminating."
-                )
+        async with self.lock:
+            should_terminate = False
+            if self._was_shutdown:
+                should_terminate = True
+            else:
+                try:
+                    memory_usage = process.virtual_memory_usage()
+                    if self.memory_threshold_per_process and memory_usage > self.memory_threshold_per_process:
+                        self.logger.debug(
+                            f"Process memory usage ({memory_usage / (1024 * 1024):.2f} MB) exceeds threshold "
+                            f"({self.memory_threshold_per_process / (1024 * 1024):.2f} MB). Terminating."
+                        )
+                        should_terminate = True
+                except Exception as e:
+                    self.logger.warning(f"Error checking process memory: {e}. Terminating process.")
+                    should_terminate = True
+
+            if should_terminate:
                 await process.stop_async()
                 process = None
-        except Exception as e:
-            self.logger.warning(f"Error checking process memory: {e}. Terminating process.")
-            await process.stop_async()
-            process = None
 
-        if process is not None:
-            await process.drain_repl_output_async()
+            if process is not None:
+                await process.drain_repl_output_async()
 
-        async with self.lock:
             assert self._num_used_processes > 0, "No processes in use"
             self._num_used_processes -= 1
 
@@ -176,27 +184,19 @@ class LeanProcessPool:
 
     return_process = to_sync(return_process_async)
 
-    def shutdown(self):
-        """Shut down all processes in the pool."""
+    async def shutdown_async(self):
+        """Shut down all processes in the pool asynchronously."""
+        async with self.lock:
+            if self._was_shutdown:
+                return
+            self._was_shutdown = True
 
-        async def _shutdown_async():
-            async with self.lock:
-                # Shut down available processes
-                for process in self.available_processes:
-                    try:
-                        process.stop()
-                    except Exception as e:
-                        self.logger.warning(f"Error shutting down process: {e}")
+            # Shut down available processes
+            for process in self.available_processes:
+                try:
+                    await process.stop_async()
+                except Exception as e:
+                    self.logger.warning(f"Error shutting down process: {e}")
+            self.available_processes = []
 
-                self.available_processes = []
-
-        # Run the coroutine in the current event loop or create a new one if needed
-        try:
-            loop = asyncio.get_event_loop()
-        except RuntimeError:
-            # If there's no event loop in the current thread, create a new one
-            loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(loop)
-
-        # Run the async function synchronously
-        loop.run_until_complete(_shutdown_async())
+    shutdown = to_sync(shutdown_async)

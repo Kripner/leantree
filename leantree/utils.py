@@ -14,16 +14,28 @@ from leantree.file_span import FileSpan
 
 
 def to_sync(func):
-    try:
-        loop = asyncio.get_event_loop()
-    except RuntimeError:
-        # If there's no event loop in the current thread, create a new one
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
-        return loop.run_until_complete(func(*args, **kwargs))
+        loop_created = False
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            # If there's no event loop in the current thread, create a new one
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop_created = True
+
+        if loop.is_running():
+            raise RuntimeError(
+                "Called a synchronous function from within a running event loop."
+                "Use the async version of the function instead (called `..._async`)."
+            )
+        
+        try:
+            return loop.run_until_complete(func(*args, **kwargs))
+        finally:
+            if loop_created:
+                loop.close()
     return wrapper
 
 class AsyncToSyncIterator:

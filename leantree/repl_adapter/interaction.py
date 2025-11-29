@@ -152,8 +152,8 @@ class LeanProcess:
 
     async def __aexit__(self, *args, **kwargs):
         if self.pool:
-            # If this is a managed server, return it to the pool instead of terminating.
-            await self.pool.return_server_async(self)
+            # If this is a managed process, return it to the pool instead of terminating.
+            await self.pool.return_process_async(self)
         else:
             await self.stop_async()
 
@@ -166,8 +166,8 @@ class LeanProcess:
     def __exit__(self, *args, **kwargs):
         """Synchronous context manager exit."""
         if self.pool:
-            # If this is a managed server, return it to the pool instead of terminating.
-            self.pool.return_server(self)
+            # If this is a managed process, return it to the pool instead of terminating.
+            self.pool.return_process(self)
         else:
             self.stop()
 
@@ -320,7 +320,7 @@ class LeanProcess:
     def _assert_started(self):
         if self._proc is None or self._proc.returncode is not None:
             raise Exception(
-                "Subprocess not started or has already terminated. Use 'with AsyncLeanServer(...) as env:' or 'async with AsyncLeanServer(...) as env:'"
+                "Subprocess not started or has already terminated. Use 'with LeanProcess(...) as env:' or 'async with LeanProcess(...) as env:'"
             )
 
     async def proofs_from_sorries_async(self, theorem_with_sorries: str) -> "AsyncIterator[LeanProofBranch]":
@@ -405,7 +405,7 @@ class LeanProcess:
         Asynchronously hands control of the subprocess to the user for debugging purposes.
         """
         if self._proc is None:
-            raise Exception("Subprocess not started. Use 'async with AsyncLeanServer(...) as env:'")
+            raise Exception("Subprocess not started. Use 'async with LeanProcess(...) as env:'")
 
         async def read_and_print_stream(stream, print_prefix=""):
             while True:

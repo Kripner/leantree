@@ -156,7 +156,7 @@ class LeanProject:
             repl_path: Path | str | None = None,
             logger: utils.Logger | None = None,
             suppress_output: bool = False,
-            libraries: list["LeanLibrary"] | None = None,
+            libraries: "list[LeanLibrary | str] | None" = None,
     ) -> Self:
         if path is None:
             path = "leantree_project"
@@ -204,8 +204,10 @@ class LeanProject:
         # lean-toolchain with that of the latest mathlib. So instead, we add mathlib manually.
         run_command(["lake", "init", ".", "lib.toml"])
 
+        libraries = libraries or []
+        libraries = [LeanLibraries.from_name(library) if isinstance(library, str) else library for library in libraries]
         require_blocks = []
-        for library in (libraries or []):
+        for library in libraries:
             if library.name == "mathlib" and library.rev is None and lean_version:
                 # Specify Mathlib version - otherwise, the latest version will be used, which may not be compatible with the Lean version.
                 library.rev = lean_version
@@ -217,7 +219,7 @@ scope = "{library.scope}"
 git = "{library.git}"
             """.strip()
             if library.rev:
-                block += f"\nrev = {library.rev}"
+                block += f"\nrev = \"{library.rev}\""
             require_blocks.append(block)
 
         if require_blocks:
@@ -269,3 +271,10 @@ class LeanLibraries:
         scope="leanprover-community",
         git="https://github.com/leanprover-community/mathlib4",
     )
+
+    @classmethod
+    def from_name(cls, name: str) -> "LeanLibrary":
+        if name == "mathlib":
+            return cls.MATHLIB
+        else:
+            raise ValueError(f"Unknown library: {name}")
