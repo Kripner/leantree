@@ -1,9 +1,12 @@
 import argparse
 import asyncio
+import base64
 import datetime
 import functools
 import os
+import pickle
 import re
+import traceback
 from enum import Enum
 from pathlib import Path
 from typing import Set, Callable, AsyncIterator, Self
@@ -11,6 +14,133 @@ from typing import Set, Callable, AsyncIterator, Self
 from PrettyPrint import PrettyPrintTree
 
 from leantree.file_span import FileSpan
+
+
+class RemoteException(RuntimeError):
+    """Exception wrapper that preserves server-side traceback information."""
+
+    def __init__(self, message: str, original_exception: Exception = None, traceback_str: str = None):
+        # Include traceback in the message so it's visible when exception is printed
+        if traceback_str:
+            full_message = f"{message}\n\nServer traceback:\n{traceback_str}"
+        else:
+            full_message = message
+        super().__init__(full_message)
+        self.original_exception = original_exception
+        self.traceback_str = traceback_str
+        if original_exception is not None:
+            self.__cause__ = original_exception
+
+
+def serialize_exception(exception: Exception) -> dict:
+    """
+    Serialize an exception for transmission over the network.
+    
+    Attempts to pickle the exception directly. If that fails, falls back to
+    storing exception metadata (type, message, traceback).
+    Always includes traceback information since tracebacks are not picklable.
+    
+    Args:
+        exception: The exception to serialize
+        
+    Returns:
+        A dictionary containing either:
+        - "exception": base64-encoded pickled exception (if pickling succeeds)
+        - "exception_info": dict with type, message, and traceback (if pickling fails)
+        - "traceback": formatted traceback string (always included)
+        - "pickle_error": error message if pickling failed
+    """
+    # Always capture traceback since it's not picklable
+    traceback_str = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
+
+    try:
+        # Try to pickle the exception directly
+        pickled_exception = pickle.dumps(exception)
+        # Encode as base64 for JSON transmission
+        return {
+            "exception": base64.b64encode(pickled_exception).decode("utf-8"),
+            "traceback": traceback_str,
+        }
+    except Exception as pickle_error:
+        # If pickling fails, include basic exception info
+        return {
+            "exception_info": {
+                "type": type(exception).__name__,
+                "message": str(exception),
+                "traceback": traceback_str,
+            },
+            "pickle_error": f"Failed to pickle exception: {pickle_error}",
+        }
+
+
+def deserialize_exception(error_data: dict, error_message: str = None) -> Exception:
+    """
+    Deserialize an exception from network transmission data.
+    
+    Attempts to unpickle the exception directly. If that fails, uses exception_info
+    to create a proxy exception with the same type and message.
+    Always includes traceback information from the server.
+    
+    Args:
+        error_data: Dictionary containing serialized exception data (from serialize_exception)
+        error_message: Optional error message to use in the RuntimeError wrapper
+        
+    Returns:
+        A RuntimeError with the original exception (or proxy) set as __cause__
+        and traceback information attached
+        
+    Raises:
+        RuntimeError: Always raises a RuntimeError with the original exception as cause
+    """
+    # Extract traceback string if available
+    traceback_str = None
+    if "traceback" in error_data:
+        traceback_str = error_data["traceback"]
+        # Handle both string and list formats for backward compatibility
+        if isinstance(traceback_str, list):
+            traceback_str = "".join(traceback_str)
+    elif "exception_info" in error_data and "traceback" in error_data["exception_info"]:
+        traceback_str = error_data["exception_info"]["traceback"]
+        # Handle both string and list formats for backward compatibility
+        if isinstance(traceback_str, list):
+            traceback_str = "".join(traceback_str)
+
+    if "exception" in error_data:
+        try:
+            pickled_data = base64.b64decode(error_data["exception"])
+            original_exception = pickle.loads(pickled_data)
+
+            # Create a RemoteException with the original exception as the cause
+            return RemoteException(
+                error_message or "Error from remote server",
+                original_exception=original_exception,
+                traceback_str=traceback_str
+            )
+        except Exception as unpickle_error:
+            # If unpickling fails, check if we have exception_info as fallback
+            if "exception_info" in error_data:
+                exc_info = error_data["exception_info"]
+                # Create a proxy exception with the same type name
+                exception_type_name = exc_info.get("type", "Exception")
+                exception_msg = exc_info.get("message", error_message or "Unknown error")
+                proxy_exception = type(exception_type_name, (Exception,), {})(exception_msg)
+
+                return RemoteException(
+                    error_message or "Error from remote server",
+                    original_exception=proxy_exception,
+                    traceback_str=traceback_str
+                )
+            else:
+                # If unpickling fails and no fallback, raise with error message
+                return RemoteException(
+                    f"{error_message or 'Error from remote server'} (failed to unpickle exception: {unpickle_error})",
+                    traceback_str=traceback_str
+                )
+    else:
+        return RemoteException(
+            error_message or "Error from remote server",
+            traceback_str=traceback_str
+        )
 
 
 def to_sync(func):
@@ -30,13 +160,15 @@ def to_sync(func):
                 "Called a synchronous function from within a running event loop."
                 "Use the async version of the function instead (called `..._async`)."
             )
-        
+
         try:
             return loop.run_until_complete(func(*args, **kwargs))
         finally:
             if loop_created:
                 loop.close()
+
     return wrapper
+
 
 class AsyncToSyncIterator:
     """
@@ -45,19 +177,21 @@ class AsyncToSyncIterator:
     This class allows asynchronous iterators to be used in synchronous contexts
     by converting async iteration to sync iteration.
     """
+
     def __init__(self, async_iter: AsyncIterator, loop: asyncio.AbstractEventLoop):
         self.async_iter = async_iter
         self.loop = loop
-        
+
     def __iter__(self):
         return self
-        
+
     def __next__(self):
         try:
             # Use run_until_complete to get the next item synchronously
             return self.loop.run_until_complete(self.async_iter.__anext__())
         except StopAsyncIteration:
             raise StopIteration
+
 
 def to_sync_iterator(func):
     """
@@ -66,6 +200,7 @@ def to_sync_iterator(func):
     This decorator takes an async function that returns an AsyncIterator and
     converts it to a synchronous function that returns a regular Iterator.
     """
+
     @functools.wraps(func)
     def wrapper(*args, **kwargs):
         # Get or create event loop
@@ -75,11 +210,12 @@ def to_sync_iterator(func):
             # If there's no event loop in the current thread, create a new one
             loop = asyncio.new_event_loop()
             asyncio.set_event_loop(loop)
-            
+
         async_iter = func(*args, **kwargs)
         return AsyncToSyncIterator(async_iter, loop)
-    
+
     return wrapper
+
 
 def pretty_print_tree[TypeNode](
         root: TypeNode,
@@ -111,7 +247,6 @@ def pretty_print_tree[TypeNode](
         trim=max_label_len,
     )
     return pt(root)
-
 
 
 def get_args_descriptor(
@@ -299,12 +434,14 @@ def remove_empty_lines(s: str) -> str:
 def is_just_comments(s: str) -> bool:
     return remove_empty_lines(remove_comments(s)).strip() == ""
 
+
 def replace_with_sorries(theorem_str: str, sorries_mask: list[FileSpan]) -> str:
     return get_source_with_sorries(
         FileSpan.whole_file(theorem_str),
         sorries_mask,
         theorem_str,
     )
+
 
 def get_source_with_sorries(
         span: FileSpan,

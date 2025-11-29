@@ -6,8 +6,6 @@ import psutil
 from leantree.repl_adapter.interaction import LeanProcess
 from leantree.utils import Logger, NullLogger, to_sync
 
-# TODO:
-#  - caching based on imported libraries
 
 class LeanProcessPool:
     """
@@ -79,19 +77,20 @@ class LeanProcessPool:
             processes_to_start = self.max_processes - (len(self.available_processes) + self._num_used_processes)
             if processes_to_start <= 0:
                 return
-            
+
             self.logger.info(f"Starting {processes_to_start} processes in parallel")
-            
+
             # Start processes in parallel.
             tasks = [self._create_process_async() for _ in range(processes_to_start)]
             new_processes = await asyncio.gather(*tasks)
-            
+
             self.available_processes.extend(new_processes)
-            
+
             if self.available_processes:
                 self.process_available_event.set()
-                
-            self.logger.info(f"Started {len(new_processes)} processes. Available: {len(self.available_processes)}, Used: {self._num_used_processes}")
+
+            self.logger.info(
+                f"Started {len(new_processes)} processes. Available: {len(self.available_processes)}, Used: {self._num_used_processes}")
 
     async def get_process_async(self, blocking: bool = True) -> LeanProcess | None:
         """

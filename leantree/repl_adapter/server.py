@@ -10,6 +10,7 @@ import urllib.error
 from leantree.repl_adapter.interaction import LeanProcess, LeanProofBranch
 from leantree.repl_adapter.process_pool import LeanProcessPool
 from leantree.core.lean import LeanProofState, LeanTactic, LeanGoal
+from leantree.utils import serialize_exception, deserialize_exception
 
 
 class LeanServer:
@@ -158,7 +159,7 @@ class LeanServer:
                         process_id = server._get_process_id(process)
                         self._send_json(200, {"process_id": process_id})
                 except Exception as e:
-                    self._send_error(500, str(e))
+                    self._send_error(500, str(e), exception=e)
 
             def _handle_command(self, process_id: int):
                 try:
@@ -169,7 +170,7 @@ class LeanServer:
                     response = server._run_async(process.send_command_async(command))
                     self._send_json(200, response)
                 except Exception as e:
-                    self._send_error(500, str(e))
+                    self._send_error(500, str(e), exception=e)
 
             def _handle_return_process(self, process_id: int):
                 try:
@@ -178,7 +179,7 @@ class LeanServer:
                     server._remove_process(process_id)
                     self._send_json(200, {"status": "ok"})
                 except Exception as e:
-                    self._send_error(500, str(e))
+                    self._send_error(500, str(e), exception=e)
 
             def _handle_proof_from_sorry(self, process_id: int):
                 try:
@@ -187,7 +188,11 @@ class LeanServer:
                     theorem_with_sorry = data["theorem_with_sorry"]
 
                     # Get the first proof branch
-                    proof_branches = list(server._run_async(process.proofs_from_sorries_async(theorem_with_sorry)))
+                    # proofs_from_sorries_async returns an AsyncIterator, so we need to collect it
+                    async def collect_proof_branches():
+                        return [branch async for branch in process.proofs_from_sorries_async(theorem_with_sorry)]
+
+                    proof_branches = server._run_async(collect_proof_branches())
                     if len(proof_branches) == 0:
                         self._send_error(400, "No sorries found in theorem")
                         return
@@ -203,7 +208,7 @@ class LeanServer:
                     }
                     self._send_json(200, response)
                 except Exception as e:
-                    self._send_error(500, str(e))
+                    self._send_error(500, str(e), exception=e)
 
             def _handle_apply_tactic(self, process_id: int, proof_state_id: int):
                 try:
@@ -228,7 +233,7 @@ class LeanServer:
                     }
                     self._send_json(200, response)
                 except Exception as e:
-                    self._send_error(500, str(e))
+                    self._send_error(500, str(e), exception=e)
 
             def _handle_proof_state(self, process_id: int, proof_state_id: int):
                 # This would need to track proof branches on the server
@@ -246,11 +251,19 @@ class LeanServer:
                 self.end_headers()
                 self.wfile.write(json.dumps(data).encode("utf-8"))
 
-            def _send_error(self, status_code: int, message: str):
+            def _send_error(self, status_code: int, message: str, exception: Exception = None):
+                """Send an error response, optionally including a pickled exception."""
+                error_data = {"error": message}
+
+                if exception is not None:
+                    # Serialize the exception using the utility function
+                    exception_data = serialize_exception(exception)
+                    error_data.update(exception_data)
+
                 self.send_response(status_code)
                 self.send_header("Content-Type", "application/json")
                 self.end_headers()
-                self.wfile.write(json.dumps({"error": message}).encode("utf-8"))
+                self.wfile.write(json.dumps(error_data).encode("utf-8"))
 
             def log_message(self, format, *args):
                 # Suppress default logging
@@ -284,7 +297,10 @@ class LeanClient:
             error_body = e.read().decode("utf-8")
             try:
                 error_data = json.loads(error_body)
-                raise RuntimeError(f"Error from LeanServer: {error_data.get('error', str(e))}")
+                error_message = error_data.get("error", str(e))
+
+                # Deserialize the exception using the utility function
+                raise deserialize_exception(error_data, f"Error from LeanServer: {error_message}")
             except json.JSONDecodeError:
                 raise RuntimeError(f"Error from LeanServer: {str(e)}")
 
@@ -372,7 +388,6 @@ class RemoteLeanProofBranch:
 
         # Create new proof branches from the response
         new_proof_state_id = response["proof_state_id"]
-        new_goals = [LeanGoal.from_dict(g) for g in response["goals"]]
 
         # For simplicity, return a single branch (in real implementation would handle multiple branches)
         return [RemoteLeanProofBranch(self.client, self.process_id, new_proof_state_id, response["goals"])]
