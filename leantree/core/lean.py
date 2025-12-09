@@ -1,5 +1,5 @@
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import ClassVar, Self
 
 from leantree.core.abstraction import ProofState, ProofTactic, ProofGoal
@@ -35,6 +35,9 @@ class LeanHypothesis:
 
     def __str__(self):
         return f"{self.user_name} : {self.type}" + (f" := {self.value}" if self.value else "")
+
+    def with_(self, **changes) -> Self:
+        return replace(self, **changes)
 
     @classmethod
     def from_string(cls, s: str) -> list[Self]:
@@ -115,6 +118,9 @@ class LeanGoal(ProofGoal):
                 "\n".join(h.__str__() for h in self.hypotheses) +
                 f"\n{self.TargetSymbol} {self.type}"
         )
+
+    def with_(self, **changes) -> Self:
+        return replace(self, **changes)
 
     # TODO: unit tests
     @classmethod

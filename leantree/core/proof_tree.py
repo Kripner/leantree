@@ -1,5 +1,5 @@
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import cached_property
 from typing import Self, Callable
 
@@ -40,6 +40,9 @@ class ProofTreeEdge:
             tactic_depends_on=data["tactic_depends_on"],
         )
 
+    def with_(self, **changes):
+        return replace(self, **changes)
+
 
 @dataclass
 class ProofTreeNode:
@@ -56,6 +59,9 @@ class ProofTreeNode:
 
     def __eq__(self, other) -> bool:
         return isinstance(other, ProofTreeNode) and other.id == self.id
+
+    def with_(self, **changes):
+        return replace(self, **changes)
 
     @classmethod
     def from_state(cls, state: LeanProofState) -> Self:
