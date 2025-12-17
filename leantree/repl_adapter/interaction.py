@@ -120,7 +120,10 @@ class LeanProcess:
     async def stop_async(self):
         """Stop the Lean REPL asynchronously."""
         assert self._proc is not None
-        self._proc.kill()
+        try:
+            self._proc.kill()
+        except ProcessLookupError:
+            pass
         # See https://github.com/python/cpython/issues/119710#issuecomment-2425168469
         # and https://github.com/python/cpython/issues/88050
         # on why this line is necessary (otherwise the wait() call hangs).
