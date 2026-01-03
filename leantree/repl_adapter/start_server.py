@@ -1,7 +1,6 @@
 """CLI script to start the Lean server."""
 
 import argparse
-import asyncio
 import os
 import signal
 import sys
@@ -109,12 +108,6 @@ def main():
         env_setup_async=env_setup_async,
     )
 
-    # Warmup: pre-start all processes if requested
-    if args.warmup:
-        print(f"Warming up {args.max_processes} processes...")
-        asyncio.run(pool.max_out_processes_async())
-        print("Warmup complete.")
-
     # Start server
     server = start_server(
         pool,
@@ -122,6 +115,12 @@ def main():
         port=args.port,
         log_level=args.log_level
     )
+
+    # Warmup: pre-start all processes if requested (must be after server starts to use its event loop)
+    if args.warmup:
+        print(f"Warming up {args.max_processes} processes...")
+        server._run_async(pool.max_out_processes_async())
+        print("Warmup complete.")
     print(f"Lean project: {project_path}")
     print(f"REPL executable: {repl_exe}")
     if args.imports:
