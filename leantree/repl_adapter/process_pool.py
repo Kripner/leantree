@@ -45,14 +45,29 @@ class LeanProcessPool:
         self.available_processes: list[LeanProcess] = []
         self.checkpoints: dict[LeanProcess, LeanEnvironmentCheckpoint] = {}
         self._num_used_processes: int = 0
-        self.lock = asyncio.Lock()  # Use asyncio.Lock instead of threading.RLock
-        self.process_available_event = asyncio.Event()
+        # Lazily initialized asyncio primitives (to bind to correct event loop)
+        self._lock: asyncio.Lock | None = None
+        self._process_available_event: asyncio.Event | None = None
         self.env_setup_async = env_setup_async
         # Calculate memory threshold per server based on total system memory
         total_memory = psutil.virtual_memory().total
         self.memory_threshold_per_process = int(total_memory * (self.max_memory_utilization / 100) / self.max_processes)
 
         self._was_shutdown = False
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        """Lazily create the lock to bind to the correct event loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
+
+    @property
+    def process_available_event(self) -> asyncio.Event:
+        """Lazily create the event to bind to the correct event loop."""
+        if self._process_available_event is None:
+            self._process_available_event = asyncio.Event()
+        return self._process_available_event
 
     async def _create_process_async(self) -> LeanProcess:
         """Create a new LeanProcess instance."""
