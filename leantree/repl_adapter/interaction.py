@@ -1,6 +1,7 @@
 import asyncio
 import json
 import re
+from collections import deque
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -98,10 +99,28 @@ class LeanProcess:
 
         self._proc = None
         self._env_id = None
+        self._stderr_buffer = deque(maxlen=50)
+        self._stderr_task = None
+
+    async def _monitor_stderr(self):
+        """Read stderr in the background and buffer the last few lines."""
+        try:
+            while True:
+                line = await self._proc.stderr.readline()
+                if not line:
+                    break
+                decoded_line = line.decode('utf-8', errors='replace').strip()
+                if decoded_line:
+                    self._stderr_buffer.append(decoded_line)
+                    # Also log to debug so it's not lost if not an error
+                    self.logger.debug(f"REPL STDERR: {decoded_line}")
+        except Exception as e:
+            self.logger.warning(f"Error reading stderr: {e}")
 
     async def start_async(self):
         """Start the Lean REPL asynchronously."""
         assert self._proc is None
+        self._stderr_buffer.clear()
         cmd = ["lake", "env", str(self.repl_exe)]
 
         self.logger.debug(f"Starting Lean REPL with command: {cmd} (working directory: {self.project_path})")
@@ -114,18 +133,30 @@ class LeanProcess:
             # The limit argument sets the buffer limit for StreamReader wrappers for Process.stdout and Process.stderr.
             limit=16 * 1024 * 1024,  # 16 MB
         )
+        self._stderr_task = asyncio.create_task(self._monitor_stderr())
 
     start = to_sync(start_async)
 
     async def stop_async(self):
         """Stop the Lean REPL asynchronously."""
         assert self._proc is not None
-        self._proc.kill()
+        try:
+            self._proc.kill()
+        except ProcessLookupError:
+            pass
         # See https://github.com/python/cpython/issues/119710#issuecomment-2425168469
         # and https://github.com/python/cpython/issues/88050
         # on why this line is necessary (otherwise the wait() call hangs).
         self._proc._transport.close()
         await self._proc.wait()
+
+        if self._stderr_task:
+            try:
+                await asyncio.wait_for(self._stderr_task, timeout=1.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError):
+                self._stderr_task.cancel()
+            self._stderr_task = None
+
         self._proc = None
 
     stop = to_sync(stop_async)
@@ -215,6 +246,8 @@ class LeanProcess:
             raise LeanInteractionException(f"REPL returned error messages: {json.dumps(errors, ensure_ascii=False)}")
 
         message = response.get("message")
+        if message == "Operation timed out":
+            raise LeanInteractionException("Tactic application timed out.")
         if message and message.startswith("Lean error:"):
             raise LeanInteractionException(f"REPL returned error: {message}")
 
@@ -319,9 +352,16 @@ class LeanProcess:
     unpickle = to_sync(unpickle_async)
 
     def _assert_started(self):
-        if self._proc is None or self._proc.returncode is not None:
+        if self._proc is None:
             raise Exception(
-                "Subprocess not started or has already terminated. Use 'with LeanProcess(...) as env:' or 'async with LeanProcess(...) as env:'"
+                "Subprocess not started. Use 'with LeanProcess(...) as env:' or 'async with LeanProcess(...) as env:'"
+            )
+        if self._proc.returncode is not None:
+            stderr_tail = "\n".join(self._stderr_buffer)
+            raise Exception(
+                f"Subprocess has terminated with exit code {self._proc.returncode}.\n"
+                f"Stderr output:\n{stderr_tail}\n"
+                "Use 'with LeanProcess(...) as env:' or 'async with LeanProcess(...) as env:'"
             )
 
     async def proofs_from_sorries_async(self, theorem_with_sorries: str) -> "AsyncIterator[LeanProofBranch]":
@@ -521,11 +561,15 @@ class LeanProofBranch(ProofBranch[LeanGoal, LeanTactic]):
     def is_solved(self) -> bool:
         return self.state.is_solved()
 
-    async def _send_tactic_async(self, tactic: str) -> dict:
-        response = await self._env._send_to_repl_async({
+    async def _send_tactic_async(self, tactic: str, timeout: int | None = 1000) -> dict:
+        data = {
             "tactic": tactic,
             "proofState": self._proof_state_id,
-        })
+        }
+        if timeout is not None:
+            data["timeout"] = timeout
+
+        response = await self._env._send_to_repl_async(data)
         return response
 
     async def _delete_masked_goals_async(self):
@@ -583,6 +627,7 @@ class LeanProofBranch(ProofBranch[LeanGoal, LeanTactic]):
             # example : 1 = 0 := by
             #   apply?
             ban_search_tactics: bool = True,
+            timeout: int | None = 1000,
     ) -> list[Self]:
         assert not self.state.is_solved(), "This proof branch is already solved."
         if isinstance(tactic, LeanTactic):
@@ -592,7 +637,7 @@ class LeanProofBranch(ProofBranch[LeanGoal, LeanTactic]):
         # Normalize the proof state by removing masked goals.
         await self._delete_masked_goals_async()
 
-        response = await self._send_tactic_async(tactic)
+        response = await self._send_tactic_async(tactic, timeout=timeout)
         if "goals" not in response:
             raise LeanInteractionException(f"Could not apply tactic in REPL: {json.dumps(response)}")
         new_proof_state = response["proofState"]
@@ -629,9 +674,9 @@ class LeanProofBranch(ProofBranch[LeanGoal, LeanTactic]):
 
     # TODO: def apply_tactics
 
-    async def try_apply_tactic_async(self, tactic: LeanTactic | str) -> ValueOrError[list[Self]]:
+    async def try_apply_tactic_async(self, tactic: LeanTactic | str, timeout: int | None = 1000) -> ValueOrError[list[Self]]:
         try:
-            return ValueOrError.from_success(await self.apply_tactic_async(tactic))
+            return ValueOrError.from_success(await self.apply_tactic_async(tactic, timeout=timeout))
         except (LeanInteractionException, AssertionError) as e:
             return ValueOrError.from_error(e)
 

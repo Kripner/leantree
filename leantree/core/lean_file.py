@@ -40,7 +40,7 @@ class LeanTacticBlock:
     def deserialize(cls, data: dict, theorem: "LeanTheorem") -> "LeanTacticBlock":
         return LeanTacticBlock(
             theorem=theorem,
-            tree=ProofTree.deserialize(data["tree"]) if "error" not in data["tree"] else StoredError.deserialize(data["tree"]),
+            tree=ProofTree.deserialize(data["tree"]) if data["tree"].get("error") is None else StoredError.deserialize(data["tree"]),
             span=FileSpan.deserialize(data["span"]),
         )
 
@@ -78,7 +78,7 @@ class LeanTheorem:
             name=data.get("name"),
         )
         for block_data in data["by_blocks"]:
-            if "error" in block_data:
+            if block_data.get("error") is not None:
                 by_blocks.append(StoredError.deserialize(block_data))
             else:
                 by_blocks.append(LeanTacticBlock.deserialize(block_data, thm))
@@ -109,7 +109,8 @@ class LeanFile:
             theorems=theorems,
         )
         for thm_data in data["theorems"]:
-            if "error" in thm_data:
+            # TODO: error should never be empty when it's non-None
+            if thm_data.get("error") is not None:
                 theorems.append(StoredError.deserialize(thm_data))
             else:
                 theorems.append(LeanTheorem.deserialize(thm_data, file))

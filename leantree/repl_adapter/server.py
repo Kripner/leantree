@@ -209,9 +209,14 @@ class LeanServer:
                     async def collect_proof_branches():
                         return [branch async for branch in process.proofs_from_sorries_async(theorem_with_sorry)]
 
-                    proof_branches = server._run_async(collect_proof_branches())
+                    try:
+                        proof_branches = server._run_async(collect_proof_branches())
+                    except LeanInteractionException as e:
+                        self._send_json(200, {"error": str(e)})
+                        return
+
                     if len(proof_branches) == 0:
-                        self._send_error(400, "No sorries found in theorem")
+                        self._send_json(200, {"error": "No sorries found in theorem"})
                         return
 
                     proof_branch = proof_branches[0]
@@ -223,7 +228,7 @@ class LeanServer:
                         "proof_state_id": proof_state_id,
                         "goals": goals,
                     }
-                    self._send_json(200, response)
+                    self._send_json(200, {"value": response})
                 except Exception as e:
                     self._send_error(500, str(e), exception=e)
 
@@ -232,13 +237,18 @@ class LeanServer:
                     process = server._get_process(process_id)
                     data = self._read_json()
                     tactic = data["tactic"]
+                    timeout = data.get("timeout")
 
                     # Create a minimal proof branch to apply tactic
                     # In a real implementation, we'd track proof branches on the server
-                    response_dict = server._run_async(process._send_to_repl_async({
+                    payload = {
                         "tactic": tactic,
                         "proofState": proof_state_id,
-                    }))
+                    }
+                    if timeout is not None:
+                        payload["timeout"] = timeout
+
+                    response_dict = server._run_async(process._send_to_repl_async(payload))
 
                     # Extract goals and new proof state
                     new_proof_state_id = response_dict.get("proofState")
@@ -257,12 +267,17 @@ class LeanServer:
                     process = server._get_process(process_id)
                     data = self._read_json()
                     tactic = data["tactic"]
+                    timeout = data.get("timeout")
 
                     # Create a minimal proof branch to apply tactic
-                    response_dict = server._run_async(process._send_to_repl_async({
+                    payload = {
                         "tactic": tactic,
                         "proofState": proof_state_id,
-                    }))
+                    }
+                    if timeout is not None:
+                        payload["timeout"] = timeout
+
+                    response_dict = server._run_async(process._send_to_repl_async(payload))
 
                     step_error = LeanProofBranch.step_error_from_response(response_dict)
                     if step_error:
@@ -395,19 +410,24 @@ class LeanRemoteProcess:
         """Return the process to the pool."""
         self.client._request("POST", f"/process/{self.process_id}/return")
 
-    def proof_from_sorry(self, theorem_with_sorry: str) -> "RemoteLeanProofBranch":
+    def proof_from_sorry(self, theorem_with_sorry: str) -> ValueOrError["RemoteLeanProofBranch"]:
         """Create a proof branch from a theorem with sorry."""
         response = self.client._request(
             "POST",
             f"/process/{self.process_id}/proof_from_sorry",
             {"theorem_with_sorry": theorem_with_sorry}
         )
-        return RemoteLeanProofBranch(
+
+        if "error" in response:
+            return ValueOrError.from_error(response["error"])
+
+        value = response["value"]
+        return ValueOrError.from_success(RemoteLeanProofBranch(
             self.client,
             self.process_id,
-            response["proof_state_id"],
-            response["goals"]
-        )
+            value["proof_state_id"],
+            value["goals"]
+        ))
 
 
 class RemoteLeanProofBranch:
@@ -428,15 +448,20 @@ class RemoteLeanProofBranch:
             self,
             tactic: LeanTactic | str,
             ban_search_tactics: bool = True,
+            timeout: int | None = 1000,
     ) -> ValueOrError[list["RemoteLeanProofBranch"]]:
         """Apply a tactic to the proof branch."""
         if isinstance(tactic, LeanTactic):
             tactic = tactic.tactic
 
+        data = {"tactic": tactic}
+        if timeout is not None:
+            data["timeout"] = timeout
+
         response = self.client._request(
             "POST",
             f"/process/{self.process_id}/proof/{self._proof_state_id}/try_apply_tactic",
-            {"tactic": tactic}
+            data
         )
 
         if "error" in response:

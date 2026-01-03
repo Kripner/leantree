@@ -16,6 +16,7 @@ from PrettyPrint import PrettyPrintTree
 from leantree.file_span import FileSpan
 
 
+# TODO: have a look at torch._utils.ExceptionWrapper
 class RemoteException(RuntimeError):
     """Exception wrapper that preserves server-side traceback information."""
 

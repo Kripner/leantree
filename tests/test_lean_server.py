@@ -286,7 +286,9 @@ async def test_proof_from_sorry(project_path: Path):
 
         with client.get_process(blocking=True) as process:
             theorem = "example : 2 + 2 = 4 := by sorry"
-            proof_branch = process.proof_from_sorry(theorem)
+            result = process.proof_from_sorry(theorem)
+            assert result.is_success()
+            proof_branch = result.value
 
             assert proof_branch is not None
             assert proof_branch._proof_state_id is not None
@@ -321,7 +323,9 @@ async def test_apply_tactic(project_path: Path):
 
         with client.get_process(blocking=True) as process:
             theorem = "example : 2 + 2 = 4 := by sorry"
-            proof_branch = process.proof_from_sorry(theorem)
+            result = process.proof_from_sorry(theorem)
+            assert result.is_success()
+            proof_branch = result.value
 
             initial_state = proof_branch.state
             assert not initial_state.is_solved()
@@ -465,13 +469,19 @@ async def test_error_handling(project_path: Path):
         except urllib.error.HTTPError as e:
             assert e.code == 500  # Server error for invalid process ID
 
-        # Test invalid theorem (no sorry)
+        # Test invalid theorem (no sorry) - this raises generic Exception in interaction.py, so it becomes 500 -> RuntimeError
         with client.get_process(blocking=True) as process:
             try:
                 process.proof_from_sorry("example : 2 + 2 = 4 := rfl")
-                assert False, "Should have raised an error"
-            except RuntimeError:
-                pass  # Expected error
+                assert False, "Should have raised RuntimeError (500)"
+            except RuntimeError as e:
+                assert "No `sorries` in REPL response" in str(e)
+
+        # Test syntactically incorrect theorem - this raises LeanInteractionException, so it becomes 200 -> ValueOrError
+        with client.get_process(blocking=True) as process:
+            result = process.proof_from_sorry("example : 2 + 2 = 4 := by sorr")  # Typo
+            assert not result.is_success()
+            assert "REPL returned error" in result.error or "error" in result.error
 
     finally:
         server.stop()
@@ -502,7 +512,9 @@ async def test_complete_proof_workflow(project_path: Path):
             theorem = """
             example : ∀ (p q : Prop), p → q → p ∧ q := by sorry
             """
-            proof_branch = process.proof_from_sorry(theorem)
+            result = process.proof_from_sorry(theorem)
+            assert result.is_success()
+            proof_branch = result.value
 
             initial_state = proof_branch.state
             assert len(initial_state.goals) == 1
