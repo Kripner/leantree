@@ -130,8 +130,10 @@ def main():
     # Handle shutdown gracefully
     def signal_handler(sig, frame):
         print("\nShutting down server...")
+        # Shut down pool on the server's event loop before stopping it
+        # (pool's asyncio primitives are bound to that loop)
+        server._run_async(pool.shutdown_async())
         server.stop()
-        pool.shutdown()
         sys.exit(0)
 
     signal.signal(signal.SIGINT, signal_handler)
