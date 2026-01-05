@@ -4,9 +4,10 @@ import argparse
 import os
 import signal
 import sys
+import threading
 from pathlib import Path
 
-from leantree.repl_adapter.server import start_server
+from leantree.repl_adapter.server import start_server, LeanClient
 from leantree.repl_adapter.process_pool import LeanProcessPool
 from leantree.utils import Logger, LogLevel
 
@@ -138,6 +139,44 @@ def main():
 
     signal.signal(signal.SIGINT, signal_handler)
     signal.signal(signal.SIGTERM, signal_handler)
+
+    # Start keyboard monitoring thread
+    def keyboard_monitor():
+        client = LeanClient(args.address, args.port)
+        while True:
+            try:
+                input()  # Wait for Enter key
+                try:
+                    status = client.check_status()
+                    print(f"\n=== Server Status ===")
+                    print(f"Processes: {status['available_processes']} available, "
+                          f"{status['used_processes']} used, "
+                          f"{status['starting_processes']} starting, "
+                          f"{status['max_processes']} max")
+                    print(f"RAM: {status['ram']['percent']:.1f}% used "
+                          f"({status['ram']['used_bytes'] / (1024**3):.1f}GB / "
+                          f"{status['ram']['total_bytes'] / (1024**3):.1f}GB)")
+                    avg_cpu = sum(status['cpu_percent_per_core']) / len(status['cpu_percent_per_core'])
+                    print(f"CPU: {avg_cpu:.1f}% average across {len(status['cpu_percent_per_core'])} cores")
+                    
+                    # Show active requests
+                    active_requests = status.get('active_requests', [])
+                    if active_requests:
+                        print(f"Active requests ({len(active_requests)}):")
+                        for req in active_requests:
+                            print(f"  - {req['path']} ({req['duration_seconds']}s, thread: {req['thread']})")
+                    else:
+                        print("Active requests: none")
+                    print()
+                except Exception as e:
+                    print(f"Error getting status: {e}")
+            except EOFError:
+                # stdin closed, exit the thread
+                break
+
+    keyboard_thread = threading.Thread(target=keyboard_monitor, daemon=True)
+    keyboard_thread.start()
+    print("Press Enter to show server status")
 
     try:
         import time
