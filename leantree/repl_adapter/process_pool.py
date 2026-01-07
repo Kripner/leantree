@@ -45,6 +45,7 @@ class LeanProcessPool:
         self.available_processes: list[LeanProcess] = []
         self.checkpoints: dict[LeanProcess, LeanEnvironmentCheckpoint] = {}
         self._num_used_processes: int = 0
+        self._num_starting_processes: int = 0
         # Lazily initialized asyncio primitives (to bind to correct event loop)
         self._lock: asyncio.Lock | None = None
         self._process_available_event: asyncio.Event | None = None
@@ -69,19 +70,29 @@ class LeanProcessPool:
             self._process_available_event = asyncio.Event()
         return self._process_available_event
 
-    async def _create_process_async(self) -> LeanProcess:
-        """Create a new LeanProcess instance."""
-        process = LeanProcess(
-            self.repl_exe,
-            self.project_path,
-            self.logger,
-            pool=self,
-        )
-        await process.start_async()
-        if self.env_setup_async:
-            await self.env_setup_async(process)
-        self.checkpoints[process] = process.checkpoint()
-        return process
+    async def _create_process_async(self, track_starting: bool = True) -> LeanProcess:
+        """Create a new LeanProcess instance.
+        
+        Args:
+            track_starting: If True, increment/decrement _num_starting_processes counter.
+        """
+        if track_starting:
+            self._num_starting_processes += 1
+        try:
+            process = LeanProcess(
+                self.repl_exe,
+                self.project_path,
+                self.logger,
+                pool=self,
+            )
+            await process.start_async()
+            if self.env_setup_async:
+                await self.env_setup_async(process)
+            self.checkpoints[process] = process.checkpoint()
+            return process
+        finally:
+            if track_starting:
+                self._num_starting_processes -= 1
 
     async def max_out_processes_async(self):
         """
@@ -109,17 +120,25 @@ class LeanProcessPool:
             self.logger.info(
                 f"Started {len(new_processes)} processes. Available: {len(self.available_processes)}, Used: {self._num_used_processes}")
 
-    async def get_process_async(self, blocking: bool = True) -> LeanProcess | None:
+    async def get_process_async(self, blocking: bool = True, timeout: float | None = None) -> LeanProcess | None:
         """
         Get a process from the pool asynchronously.
 
         Args:
             blocking: If True, wait until a process is available. If False, return None if no process is available.
+            timeout: Maximum time to wait for a process (in seconds). Only used if blocking=True.
+                     If None, waits indefinitely.
 
         Returns:
-            A LeanProcess instance if available, None otherwise (only if blocking=False)
+            A LeanProcess instance if available, None otherwise (only if blocking=False or timeout expires)
+
+        Raises:
+            RuntimeError: If the pool has been shut down
         """
         async with self.lock:
+            if self._was_shutdown:
+                raise RuntimeError("Process pool has been shut down")
+
             if self.available_processes:
                 process = self.available_processes.pop()
                 if not self.available_processes:
@@ -138,15 +157,28 @@ class LeanProcessPool:
             return None
 
         # Wait for a process to become available asynchronously
+        start_time = time.monotonic()
         while True:
+            # Calculate remaining time if timeout is set
+            if timeout is not None:
+                elapsed = time.monotonic() - start_time
+                if elapsed >= timeout:
+                    return None  # Timeout expired
+                wait_timeout = min(5.0, timeout - elapsed)
+            else:
+                wait_timeout = 5.0
+
             try:
                 # Wait for the event to be set with a timeout
-                await asyncio.wait_for(self.process_available_event.wait(), timeout=5.0)
+                await asyncio.wait_for(self.process_available_event.wait(), timeout=wait_timeout)
             except asyncio.TimeoutError:
-                # Continue waiting if timeout occurs
+                # Continue waiting if timeout occurs (unless total timeout expired)
                 pass
 
             async with self.lock:
+                if self._was_shutdown:
+                    raise RuntimeError("Process pool has been shut down")
+
                 if self.available_processes:
                     process = self.available_processes.pop()
                     self._num_used_processes += 1
@@ -209,6 +241,9 @@ class LeanProcessPool:
             if self._was_shutdown:
                 return
             self._was_shutdown = True
+
+            # Wake up any coroutines waiting for processes so they can see _was_shutdown
+            self.process_available_event.set()
 
             # Shut down available processes
             for process in self.available_processes:

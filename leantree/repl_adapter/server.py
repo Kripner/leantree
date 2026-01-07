@@ -2,16 +2,25 @@ import asyncio
 import json
 import logging
 import threading
+import time
 from http.server import HTTPServer, BaseHTTPRequestHandler
+from socketserver import ThreadingMixIn
 from pathlib import Path
 from typing import Self
 import urllib.request
 import urllib.error
 
+import psutil
+
 from leantree.repl_adapter.interaction import LeanProcess, LeanProofBranch, LeanInteractionException
 from leantree.repl_adapter.process_pool import LeanProcessPool
 from leantree.core.lean import LeanProofState, LeanTactic, LeanGoal
 from leantree.utils import serialize_exception, deserialize_exception, ValueOrError
+
+
+class ThreadingHTTPServer(ThreadingMixIn, HTTPServer):
+    """HTTP server that handles each request in a separate thread."""
+    daemon_threads = True
 
 
 class LeanServer:
@@ -39,6 +48,11 @@ class LeanServer:
         self._lock = threading.Lock()
         self._event_loop = None
         self._loop_thread = None
+        
+        # Request tracking for monitoring
+        self._active_requests: dict[int, dict] = {}  # request_id -> {path, start_time, thread_name}
+        self._request_id_counter = 0
+        self._requests_lock = threading.Lock()
 
     def _get_process_id(self, process: LeanProcess) -> int:
         """Get or create a process ID for a LeanProcess."""
@@ -67,12 +81,48 @@ class LeanServer:
                 if process in self._process_to_id:
                     del self._process_to_id[process]
 
-    def _run_async(self, coro):
-        """Run an async coroutine in the event loop."""
+    def _run_async(self, coro, timeout: float | None = None):
+        """Run an async coroutine in the event loop.
+        
+        Args:
+            coro: The coroutine to run
+            timeout: Optional timeout in seconds
+        """
         if self._event_loop is None:
             raise RuntimeError("Server not started")
         future = asyncio.run_coroutine_threadsafe(coro, self._event_loop)
-        return future.result()
+        return future.result(timeout=timeout)
+    
+    def _start_request(self, path: str) -> int:
+        """Register start of a request. Returns request_id."""
+        with self._requests_lock:
+            self._request_id_counter += 1
+            request_id = self._request_id_counter
+            self._active_requests[request_id] = {
+                "path": path,
+                "start_time": time.time(),
+                "thread_name": threading.current_thread().name,
+            }
+            return request_id
+    
+    def _end_request(self, request_id: int):
+        """Register end of a request."""
+        with self._requests_lock:
+            self._active_requests.pop(request_id, None)
+    
+    def get_active_requests(self) -> list[dict]:
+        """Get list of currently active requests with their duration."""
+        now = time.time()
+        with self._requests_lock:
+            return [
+                {
+                    "request_id": rid,
+                    "path": info["path"],
+                    "duration_seconds": round(now - info["start_time"], 2),
+                    "thread": info["thread_name"],
+                }
+                for rid, info in self._active_requests.items()
+            ]
 
     def start(self):
         """Start the HTTP server."""
@@ -93,7 +143,7 @@ class LeanServer:
             threading.Event().wait(0.01)
 
         handler = self._create_handler()
-        self.server = HTTPServer((self.address, self.port), handler)
+        self.server = ThreadingHTTPServer((self.address, self.port), handler)
 
         def run_server():
             self.server.serve_forever()
@@ -116,14 +166,30 @@ class LeanServer:
         class LeanServerHandler(BaseHTTPRequestHandler):
             def do_GET(self):
                 server.logger.debug(f"GET request to {self.path} from {self.client_address}")
-
-                if self.path == "/status":
-                    self._handle_status()
-                else:
-                    self._send_error(404, "Not Found")
+                request_id = server._start_request(self.path)
+                try:
+                    if self.path == "/status":
+                        self._handle_status()
+                    else:
+                        self._send_error(404, "Not Found")
+                except BrokenPipeError:
+                    # Client disconnected before we could send response - this is normal
+                    server.logger.debug(f"Client {self.client_address} disconnected during GET {self.path}")
+                finally:
+                    server._end_request(request_id)
 
             def do_POST(self):
                 server.logger.debug(f"POST request to {self.path} from {self.client_address}")
+                request_id = server._start_request(self.path)
+                try:
+                    self._do_POST_inner()
+                except BrokenPipeError:
+                    # Client disconnected before we could send response - this is normal
+                    server.logger.debug(f"Client {self.client_address} disconnected during POST {self.path}")
+                finally:
+                    server._end_request(request_id)
+
+            def _do_POST_inner(self):
 
                 if self.path == "/process/get":
                     self._handle_get_process()
@@ -157,24 +223,66 @@ class LeanServer:
 
             def _handle_status(self):
                 pool = server.pool
+                
+                # Get per-CPU core utilization
+                cpu_percent_per_core = psutil.cpu_percent(percpu=True)
+                
+                # Get RAM utilization
+                memory = psutil.virtual_memory()
+                
+                available = len(pool.available_processes)
+                used = pool._num_used_processes
+                starting = pool._num_starting_processes
+                
+                # Get active requests (excluding this status request itself)
+                active_requests = [
+                    req for req in server.get_active_requests()
+                    if req["path"] != "/status"
+                ]
+                
                 status = {
-                    "available_processes": len(pool.available_processes),
-                    "used_processes": pool._num_used_processes,
+                    "available_processes": available,
+                    "used_processes": used,
+                    "starting_processes": starting,
                     "max_processes": pool.max_processes,
+                    "active_requests": active_requests,
+                    "cpu_percent_per_core": cpu_percent_per_core,
+                    "ram": {
+                        "total_bytes": memory.total,
+                        "available_bytes": memory.available,
+                        "used_bytes": memory.used,
+                        "percent": memory.percent,
+                    },
                 }
                 self._send_json(200, status)
 
             def _handle_get_process(self):
                 data = self._read_json()
                 blocking = data.get("blocking", True)
+                # Default timeout of 1 minute to prevent indefinite blocking
+                timeout = data.get("timeout", 60.0)
 
+                process = None
+                process_id = None
                 try:
-                    process = server._run_async(server.pool.get_process_async(blocking=blocking))
+                    process = server._run_async(server.pool.get_process_async(blocking=blocking, timeout=timeout))
                     if process is None:
                         self._send_json(200, {"process_id": None})
                     else:
                         process_id = server._get_process_id(process)
                         self._send_json(200, {"process_id": process_id})
+                except BrokenPipeError:
+                    # Client disconnected - return the process to the pool if we got one
+                    if process is not None:
+                        server.logger.warning(
+                            f"Client disconnected during /process/get, returning process {process_id} to pool"
+                        )
+                        server._remove_process(process_id)
+                        try:
+                            server._run_async(server.pool.return_process_async(process))
+                        except Exception as e:
+                            server.logger.error(f"Error returning process after client disconnect: {e}")
+                    raise  # Re-raise to let the server handle the broken connection
                 except Exception as e:
                     self._send_error(500, str(e), exception=e)
 
@@ -191,9 +299,20 @@ class LeanServer:
 
             def _handle_return_process(self, process_id: int):
                 try:
-                    process = server._get_process(process_id)
+                    with server._lock:
+                        if process_id not in server._process_id_to_process:
+                            # Already returned - this is idempotent
+                            self._send_json(200, {"status": "ok", "already_returned": True})
+                            return
+                        process = server._process_id_to_process[process_id]
+                        # Remove from tracking BEFORE returning to pool to prevent
+                        # a race where another client gets this process from the pool
+                        # while it's still tracked with the old ID
+                        del server._process_id_to_process[process_id]
+                        if process in server._process_to_id:
+                            del server._process_to_id[process]
+                    # Now return to pool - any new client will get a fresh ID
                     server._run_async(server.pool.return_process_async(process))
-                    server._remove_process(process_id)
                     self._send_json(200, {"status": "ok"})
                 except Exception as e:
                     self._send_error(500, str(e), exception=e)
@@ -375,9 +494,21 @@ class LeanClient:
         """Check the status of the server."""
         return self._request("GET", "/status")
 
-    def get_process(self, blocking: bool = True) -> "LeanRemoteProcess | None":
-        """Get a process from the server."""
-        response = self._request("POST", "/process/get", {"blocking": blocking})
+    def get_process(self, blocking: bool = True, timeout: float | None = 300.0) -> "LeanRemoteProcess | None":
+        """Get a process from the server.
+        
+        Args:
+            blocking: If True, wait until a process is available. If False, return None immediately if unavailable.
+            timeout: Maximum time to wait for a process (in seconds). Only used if blocking=True.
+                     Default is 300 seconds (5 minutes). Set to None for no timeout.
+        
+        Returns:
+            A LeanRemoteProcess if available, None if not available (non-blocking) or timeout expired.
+        """
+        data = {"blocking": blocking}
+        if timeout is not None:
+            data["timeout"] = timeout
+        response = self._request("POST", "/process/get", data)
         process_id = response.get("process_id")
         if process_id is None:
             return None
@@ -390,6 +521,8 @@ class LeanRemoteProcess:
     def __init__(self, client: LeanClient, process_id: int):
         self.client = client
         self.process_id = process_id
+        self._returned = False
+        self._lock = threading.Lock()
 
     def __enter__(self) -> Self:
         return self
@@ -397,34 +530,61 @@ class LeanRemoteProcess:
     def __exit__(self, *args, **kwargs):
         """Return the process to the pool when exiting context."""
         self.return_process()
+    
+    def __del__(self):
+        """Best-effort cleanup: try to return the process if not already returned.
+        
+        Note: This is a fallback. Users should prefer using the context manager
+        or explicitly calling return_process() for reliable cleanup.
+        """
+        if not self._returned:
+            try:
+                self.return_process()
+            except Exception:
+                # Ignore errors during garbage collection - the server's lease
+                # timeout will eventually reclaim the process anyway
+                pass
+
+    def _check_not_returned(self):
+        """Check that the process hasn't been returned. Must be called with lock held."""
+        if self._returned:
+            raise RuntimeError("Process has already been returned to the pool")
 
     def send_command(self, command: str) -> dict:
         """Send a command to the remote process."""
-        return self.client._request(
-            "POST",
-            f"/process/{self.process_id}/command",
-            {"command": command}
-        )
+        with self._lock:
+            self._check_not_returned()
+            return self.client._request(
+                "POST",
+                f"/process/{self.process_id}/command",
+                {"command": command}
+            )
 
     def return_process(self):
-        """Return the process to the pool."""
+        """Return the process to the pool. Safe to call multiple times."""
+        with self._lock:
+            if self._returned:
+                return  # Already returned, nothing to do
+            self._returned = True
+        # Send the return request outside the lock to avoid holding it during I/O
         self.client._request("POST", f"/process/{self.process_id}/return")
 
     def proof_from_sorry(self, theorem_with_sorry: str) -> ValueOrError["RemoteLeanProofBranch"]:
         """Create a proof branch from a theorem with sorry."""
-        response = self.client._request(
-            "POST",
-            f"/process/{self.process_id}/proof_from_sorry",
-            {"theorem_with_sorry": theorem_with_sorry}
-        )
+        with self._lock:
+            self._check_not_returned()
+            response = self.client._request(
+                "POST",
+                f"/process/{self.process_id}/proof_from_sorry",
+                {"theorem_with_sorry": theorem_with_sorry}
+            )
 
         if "error" in response:
             return ValueOrError.from_error(response["error"])
 
         value = response["value"]
         return ValueOrError.from_success(RemoteLeanProofBranch(
-            self.client,
-            self.process_id,
+            self,  # Pass the LeanRemoteProcess to keep it alive
             value["proof_state_id"],
             value["goals"]
         ))
@@ -433,11 +593,21 @@ class LeanRemoteProcess:
 class RemoteLeanProofBranch:
     """A remote proof branch managed by a LeanServer."""
 
-    def __init__(self, client: LeanClient, process_id: int, proof_state_id: int, goals: list[dict]):
-        self.client = client
-        self.process_id = process_id
+    def __init__(self, remote_process: LeanRemoteProcess, proof_state_id: int, goals: list[dict]):
+        # Hold a reference to the LeanRemoteProcess to prevent it from being
+        # garbage collected (and returning the process to the pool) while this
+        # proof branch is still in use.
+        self._remote_process = remote_process
         self._proof_state_id = proof_state_id
         self._goals = [LeanGoal.deserialize(g) for g in goals]
+
+    @property
+    def client(self) -> LeanClient:
+        return self._remote_process.client
+
+    @property
+    def process_id(self) -> int:
+        return self._remote_process.process_id
 
     @property
     def state(self) -> LeanProofState:
@@ -471,8 +641,7 @@ class RemoteLeanProofBranch:
         branches = []
         for branch_data in branches_data:
             branches.append(RemoteLeanProofBranch(
-                self.client,
-                self.process_id,
+                self._remote_process,  # Pass the LeanRemoteProcess to keep it alive
                 branch_data["proof_state_id"],
                 branch_data["goals"]
             ))
