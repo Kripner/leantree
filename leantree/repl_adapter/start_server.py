@@ -209,6 +209,12 @@ def main():
         help="Start warmup processes in batches of this size to limit resource contention; <=0 disables batching (default: 32)"
     )
     parser.add_argument(
+        "--warmup-timeout",
+        type=float,
+        default=300.0,
+        help="Per-process timeout in seconds for the env-setup `import` command run during warmup. May need raising when many subprocesses race the disk for Mathlib oleans (default: 300)"
+    )
+    parser.add_argument(
         "--rss-hard-limit-gib",
         type=float,
         default=32.0,
@@ -285,7 +291,7 @@ def main():
     if args.imports:
         async def setup_imports(process):
             imports_str = "\n".join(f"import {imp}" for imp in args.imports)
-            await process.send_command_async(imports_str)
+            await process.send_command_async(imports_str, timeout=args.warmup_timeout)
         env_setup_async = setup_imports
 
     # Create process pool
