@@ -187,5 +187,45 @@ async def test_concurrent_acquire_release_under_load():
         await pool.shutdown_async()
 
 
+@pytest.mark.asyncio
+async def test_spawn_semaphore_caps_parallel_spawns():
+    """``spawn_concurrency_limit`` must serialize ``_spawn_async`` calls so
+    a runtime recycle wave can't fan out into N parallel Mathlib imports
+    that all blow past the 40s outer acquire deadline. Uses a slow
+    ``env_setup_async`` to make the spawn long enough to observe overlap.
+    """
+    in_flight = 0
+    peak = 0
+
+    async def slow_setup(process):
+        nonlocal in_flight, peak
+        in_flight += 1
+        peak = max(peak, in_flight)
+        try:
+            await asyncio.sleep(0.3)
+        finally:
+            in_flight -= 1
+
+    pool = LeanProcessPool(
+        repl_exe=REPL_EXE,
+        project_path=get_project_path(),
+        max_processes=4,
+        env_setup_async=slow_setup,
+        pss_recycle_limit=None,
+        spawn_concurrency_limit=2,
+    )
+    await pool.start_async()
+    try:
+        entries = await asyncio.gather(*(pool.acquire_async() for _ in range(4)))
+        assert peak == 2, (
+            f"spawn_concurrency_limit=2 should cap parallel spawns at 2; "
+            f"observed peak in-flight {peak}"
+        )
+        for e in entries:
+            pool.release(e, recycle=True)
+    finally:
+        await pool.shutdown_async()
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-v"]))

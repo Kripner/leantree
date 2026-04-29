@@ -192,7 +192,18 @@ class LeanServer:
         if self._event_loop is None:
             raise RuntimeError("Server not started")
         future = asyncio.run_coroutine_threadsafe(coro, self._event_loop)
-        return future.result(timeout=timeout)
+        try:
+            return future.result(timeout=timeout)
+        except concurrent.futures.TimeoutError:
+            # Cancel the in-flight coroutine so it doesn't silently complete
+            # after the handler has already given up - otherwise a slow
+            # _spawn_async (parallel Mathlib import under recycle pressure)
+            # publishes a checked_out entry that nobody owns, eating a pool
+            # slot until the lease reaper reclaims it ten minutes later. The
+            # cancellation propagates through acquire_async / _spawn_async's
+            # BaseException handlers, which already recycle the placeholder.
+            future.cancel()
+            raise
 
     def _run_async_op(self, coro, op_timeout: float):
         """Run a coroutine that has its own inner deadline (``op_timeout``).

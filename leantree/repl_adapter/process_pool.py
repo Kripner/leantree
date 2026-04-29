@@ -148,6 +148,7 @@ class LeanProcessPool:
         rss_hard_limit: int | None = 32 * 1024 ** 3,
         pss_recycle_limit: int | None = 4 * 1024 ** 3,
         lease_timeout: float = 600.0,
+        spawn_concurrency_limit: int | None = None,
     ):
         self.repl_exe = repl_exe
         self.project_path = project_path
@@ -156,6 +157,22 @@ class LeanProcessPool:
         self.rss_hard_limit = rss_hard_limit
         self.pss_recycle_limit = pss_recycle_limit
         self.logger = logger if logger else logging.getLogger(__name__)
+
+        # Cap concurrent _spawn_async calls. Without this, a recycle wave
+        # (e.g. processes that all hit pss_recycle_limit on the same eval
+        # boundary) triggers N simultaneous Mathlib imports which thrash
+        # the disk; each spawn then runs longer than the 40s outer acquire
+        # deadline, the HTTP handler returns 503, and the placeholder
+        # silently completes spawning into an orphan checked_out entry
+        # that only the 10-minute lease reaper can reclaim. The semaphore
+        # bounds the parallelism the same way warmup batching does.
+        # ``asyncio.Semaphore()`` in Python 3.10+ doesn't bind to a loop
+        # at construction, so creating it in __init__ is safe.
+        self._spawn_semaphore: asyncio.Semaphore | None = (
+            asyncio.Semaphore(spawn_concurrency_limit)
+            if spawn_concurrency_limit and spawn_concurrency_limit > 0
+            else None
+        )
 
         # Single source of truth.
         self._live: dict[int, PoolEntry] = {}
@@ -648,7 +665,17 @@ class LeanProcessPool:
         state on any failure between start and env-setup (otherwise the
         ~48 MiB-of-StreamReader-buffers leak documented in the old code's
         _create_process_async would resurface).
+
+        Gated by ``self._spawn_semaphore`` when a concurrency limit was
+        configured, so a runtime recycle wave can't fan out into N parallel
+        Mathlib imports.
         """
+        if self._spawn_semaphore is None:
+            return await self._spawn_inner_async()
+        async with self._spawn_semaphore:
+            return await self._spawn_inner_async()
+
+    async def _spawn_inner_async(self) -> LeanProcess:
         process = LeanProcess(
             self.repl_exe,
             self.project_path,

@@ -297,6 +297,11 @@ def main():
     # Create process pool
     rss_hard_limit = int(args.rss_hard_limit_gib * 1024**3) if args.rss_hard_limit_gib > 0 else None
     pss_recycle_limit = int(args.pss_recycle_limit_gib * 1024**3) if args.pss_recycle_limit_gib > 0 else None
+    # Same value caps both warmup batches and runtime spawn concurrency:
+    # warmup needs the limit to keep N parallel Mathlib imports from
+    # thrashing the disk, and the same constraint applies to runtime
+    # recycle waves where N entries hit the PSS limit at once.
+    warmup_batch_size = args.warmup_batch_size if args.warmup_batch_size and args.warmup_batch_size > 0 else None
     pool = LeanProcessPool(
         repl_exe=repl_exe,
         project_path=project_path,
@@ -304,6 +309,7 @@ def main():
         env_setup_async=env_setup_async,
         rss_hard_limit=rss_hard_limit,
         pss_recycle_limit=pss_recycle_limit,
+        spawn_concurrency_limit=warmup_batch_size,
     )
 
     # Start server
@@ -311,7 +317,6 @@ def main():
     logger.info(f"REPL executable: {repl_exe}")
     if args.imports:
         logger.info(f"Importing packages: {", ".join(args.imports)}")
-    warmup_batch_size = args.warmup_batch_size if args.warmup_batch_size and args.warmup_batch_size > 0 else None
     if args.warmup:
         if warmup_batch_size:
             logger.info(f"Warming up {args.max_processes} processes in batches of {warmup_batch_size} before accepting requests")

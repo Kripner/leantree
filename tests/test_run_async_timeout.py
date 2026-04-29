@@ -220,6 +220,43 @@ def test_loop_watchdog_quiet_when_loop_healthy(running_server, caplog):
     assert not misfires, f"watchdog misfired on healthy loop: {misfires}"
 
 
+def test_run_async_cancels_coroutine_on_timeout(running_server):
+    """When ``_run_async``'s outer wait expires, the underlying coroutine
+    must be cancelled - not left running on the loop. Without this, a
+    slow ``_spawn_async`` (parallel Mathlib import under recycle pressure)
+    silently completes after the handler returned 503, publishing a
+    checked_out entry that nobody owns. That orphan eats a pool slot
+    until the lease reaper reclaims it ten minutes later - the cascade
+    that motivated this fix during long RL training runs.
+    """
+    server, port = running_server
+    cancelled = threading.Event()
+    started = threading.Event()
+
+    async def parking_acquire(timeout=None):
+        started.set()
+        try:
+            await asyncio.Event().wait()  # park forever
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    server.pool.acquire_async = parking_acquire
+
+    # timeout=1.0 -> server-side _run_async deadline = 1.0 + 30 = 31s.
+    status, _ = _post_json(
+        port, "/process/get", {"blocking": True, "timeout": 1.0}, timeout=90.0
+    )
+    assert status == 503, f"expected 503 on stuck acquire, got {status}"
+    assert started.is_set(), "parking_acquire never started on the loop"
+    # Cancellation propagates asynchronously after future.cancel(); give
+    # the loop a moment to deliver CancelledError.
+    assert cancelled.wait(timeout=5.0), (
+        "coroutine was not cancelled after _run_async timeout - "
+        "_spawn_async would leak orphan placeholders"
+    )
+
+
 if __name__ == "__main__":
     pool = _FakePool()
     server = LeanServer(pool, address="127.0.0.1", port=0, log_level="ERROR")
