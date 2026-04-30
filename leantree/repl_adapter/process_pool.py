@@ -753,6 +753,7 @@ class LeanProcessPool:
                         f"Janitor: stop_async for entry {entry.id} "
                         f"(pid={entry.pid}) raised {type(e).__name__}: {e}"
                     )
+            refill_placeholder: PoolEntry | None = None
             with self._capacity_changed:
                 self._live.pop(entry.id, None)
                 # notify (not notify_all): one freed slot wakes one waiter,
@@ -760,6 +761,48 @@ class LeanProcessPool:
                 # before. notify_all here would re-create the thundering-herd
                 # bug from the original pool design.
                 self._capacity_changed.notify()
+                # Eager refill: keep the pool at max_processes so the next
+                # acquire wave doesn't pay Mathlib-import latency on the
+                # first miss. Without this, recycled slots stay empty until
+                # an acquire finds 0 idle entries and creates a placeholder
+                # inline - observed in production as "62/64 alive" sitting
+                # idle for hours after RL training stopped.
+                if (
+                    not self._shutdown
+                    and len(self._live) < self.max_processes
+                ):
+                    refill_placeholder = self._new_placeholder_locked()
+            if refill_placeholder is not None:
+                # Schedule outside the lock; the spawn re-imports Mathlib
+                # (~minutes) and must not block the janitor's next iteration.
+                asyncio.create_task(
+                    self._eager_refill_async(refill_placeholder),
+                    name=f"LeanPool-eager-refill-{refill_placeholder.id}",
+                )
+
+    async def _eager_refill_async(self, entry: PoolEntry) -> None:
+        """Spawn the subprocess for a janitor-created refill placeholder.
+
+        Mirrors warmup's ``_fill_placeholder_async`` path but tolerates a
+        shutdown racing the spawn: if ``_shutdown`` flips while we're
+        waiting on Mathlib import, recycle the freshly-spawned process so
+        the shutdown drain loop sees an empty pool. Spawn failures are
+        already handled by ``_fill_placeholder_async`` (entry recycled);
+        we just log so the failure isn't an unhandled task exception.
+        """
+        if self._shutdown:
+            self.release(entry, recycle=True, reason="shutdown during eager refill")
+            return
+        try:
+            await self._fill_placeholder_async(entry, into_idle=True)
+        except Exception as e:
+            self.logger.warning(
+                f"Eager refill: spawn for entry {entry.id} failed: "
+                f"{type(e).__name__}: {e}"
+            )
+            return
+        if self._shutdown:
+            self.release(entry, recycle=True, reason="shutdown during eager refill")
 
     def _idle_reaper_loop(self) -> None:
         """Reclaim entries whose client checked them out and went away.
