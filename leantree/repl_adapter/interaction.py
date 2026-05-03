@@ -1073,7 +1073,7 @@ class LeanProofBranch(ProofBranch[LeanGoal, LeanTactic]):
     async def apply_tactic_async(
             self,
             tactic: LeanTactic | str,
-            # Tactics rw?, apply?, exact? technically close the main goal, but the proof is invalid. Setting
+            # Tactics rw?, apply?, exact?, grind? technically close the main goal, but the proof is invalid. Setting
             # ban_search_tactics disallows these. Consider e.g.:
             # example : 1 = 0 := by
             #   apply?
@@ -1143,10 +1143,8 @@ class LeanProofBranch(ProofBranch[LeanGoal, LeanTactic]):
         if tactic.startswith("simpa ") and "sorry" in tactic:
             # As of now, the REPL does no correctly detect `sorry` in a `simpa ... using` tactic.
             raise LeanInteractionException("`sorry` not allowed in `simpa`")
-        # TODO: a better solution would be to report the `sorry` introduced by `apply?` and allow it (it seems that
-        #  apply? creates a sorry internally)
-        if ban_search_tactics and any(tactic.startswith(banned) for banned in ["apply?", "rw?", "exact?"]):
-            raise LeanInteractionException("Search tactics (apply?, rw?, exact?) are not allowed.")
+        if ban_search_tactics and any(tactic.startswith(banned) for banned in ["apply?", "rw?", "exact?", "grind?"]):
+            raise LeanInteractionException("Search tactics (apply?, rw?, exact?, grind?) are not allowed.")
 
     @classmethod
     def step_error_from_response(cls, response: dict) -> str | None:
