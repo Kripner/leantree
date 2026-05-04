@@ -211,7 +211,7 @@ def main():
     parser.add_argument(
         "--warmup-timeout",
         type=float,
-        default=300.0,
+        default=600.0,
         help="Per-process timeout in seconds for the env-setup `import` command run during warmup. May need raising when many subprocesses race the disk for Mathlib oleans (default: 300)"
     )
     parser.add_argument(
