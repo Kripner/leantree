@@ -239,12 +239,12 @@ leanserver \
 
 Key options:
 
-* `--repl-exe` / `LEAN_REPL_EXE` — path to the `repl` binary (defaults to the bundled `lean-repl/.lake/build/bin/repl`).
-* `--project-path` / `LEAN_PROJECT_PATH` — Lean project to run inside (defaults to `./leantree_project`).
-* `--imports` — packages to `import` during warmup (e.g. `Mathlib`); skipped without `--warmup`.
-* `--warmup` / `--warmup-batch-size` / `--warmup-timeout` — pre-start every worker with the given imports applied, in batches, before accepting requests.
-* `--rss-hard-limit-gib` — `RLIMIT_AS` ceiling per subprocess (default `32`); `<= 0` disables.
-* `--pss-recycle-limit-gib` — recycle a worker on return whose PSS exceeds this (default `4`); `<= 0` disables.
+* `--repl-exe` / `LEAN_REPL_EXE`: path to the `repl` binary (defaults to the bundled `lean-repl/.lake/build/bin/repl`).
+* `--project-path` / `LEAN_PROJECT_PATH`: Lean project to run inside (defaults to `./leantree_project`).
+* `--imports`: packages to `import` during warmup (e.g. `Mathlib`); skipped without `--warmup`.
+* `--warmup` / `--warmup-batch-size` / `--warmup-timeout`: pre-start every worker with the given imports applied, in batches, before accepting requests.
+* `--rss-hard-limit-gib`: `RLIMIT_AS` ceiling per subprocess (default `32`); `<= 0` disables.
+* `--pss-recycle-limit-gib`: recycle a worker on return whose PSS exceeds this (default `4`); `<= 0` disables.
 
 Once running, `kill -USR1 <pid>` dumps Python tracebacks for every thread, `kill -USR2 <pid>` (or pressing Enter in the foreground terminal) prints pool status.
 
