@@ -14,7 +14,7 @@ from tqdm import tqdm
 
 from leantree import utils
 from leantree.core.lean_file import LeanFile, StoredError
-from leantree.core.project import LeanProject, LeanTheorem
+from leantree.core.project import LeanProject
 
 
 # TODO:
@@ -40,7 +40,6 @@ def create_parser():
     view_trees = subparsers.add_parser("view_trees")
     view_stats = subparsers.add_parser("view_stats")
     merge_shards = subparsers.add_parser("merge_shards")
-    deepseek_convert = subparsers.add_parser("deepseek_convert")
     error_stats = subparsers.add_parser("error_stats")
     show_errors = subparsers.add_parser("show_errors")
 
@@ -72,10 +71,6 @@ def create_parser():
     merge_shards.add_argument("--output_dir", type=Path, required=True)
     merge_shards.add_argument("--shards_count", type=int, default=128)
     merge_shards.add_argument("--force", action="store_true", help="Override the output file if it already exists.")
-
-    deepseek_convert.add_argument("input_file", type=Path)
-    deepseek_convert.add_argument("output_file", type=Path)
-    deepseek_convert.add_argument("--force", action="store_true", help="Override the output file if it already exists.")
 
     error_stats.add_argument("error_files", type=Path, nargs="+")
     error_stats.add_argument("--output_dir", type=Path, required=True)
@@ -437,26 +432,6 @@ def merge_shards(args):
     print(f"Successfully merged {args.shards_count} shards into {output_file}")
 
 
-def deepseek_prover_convert(args):
-    if args.output_file.exists() and not args.force:
-        raise Exception(f"Output file {args.output_file} already exists")
-
-    with (open(args.input_file) as f, open(args.output_file, 'w') as out_f):
-        for line in tqdm(f):
-            theorem = LeanTheorem.deserialize(json.loads(line))
-            file = LeanFile(
-                path=None,
-                imports=["Mathlib", "Aesop"],
-                theorems=[theorem],
-            )
-            theorem.file = file
-            theorem.context = [
-                "open BigOperators Real Nat Topology Rat"
-            ]
-
-            out_f.write(json.dumps(file.serialize(), ensure_ascii=False) + "\n")
-
-
 def get_error_category(error: str) -> str:
     error = error.strip()
     if len(error) == 0:
@@ -566,8 +541,6 @@ def main(args):
         view_stats(args)
     elif args.action == "merge_shards":
         merge_shards(args)
-    elif args.action == "deepseek_convert":
-        deepseek_prover_convert(args)
     elif args.action == "error_stats":
         error_stats(args)
     elif args.action == "show_errors":

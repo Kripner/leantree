@@ -13,4 +13,4 @@ theorem succ_less_double_succ (n : ℕ) : n > 0 → n < 2 * n := by
     · rw [two_mul, add_succ]
       have h1 : 1 ≤ n' + 1
       · apply Nat.succ_le_succ (Nat.zero_le _)
-      · exact add_le_add_left h1 (n' + 1)
+      · exact Nat.add_le_add_left h1 (n' + 1)

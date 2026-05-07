@@ -222,7 +222,7 @@ output file.
 Note: `.errors` files are not merged; concatenate them manually if needed
 (`cat leantree_generated/*.errors > leantree_merged/all.errors`).
 
-The CLI also exposes `view_trees`, `view_stats`, `error_stats`, `show_errors`, and `deepseek_convert` subcommands for inspecting and converting generated datasets; run with `--help` for flags.
+The CLI also exposes `view_trees`, `view_stats`, `error_stats`, and `show_errors` subcommands for inspecting generated datasets; run with `--help` for flags.
 
 ## Lean Server (Process Pool)
 
